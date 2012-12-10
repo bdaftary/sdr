@@ -1,0 +1,388 @@
+#!/usr/bin/perl
+#
+## COPYRIGHT: Copyright (c) 2012 System Data Recorder
+##
+##  This program is free software; you can redistribute it and/or
+##  modify it under the terms of the GNU General Public License
+##  as published by the Free Software Foundation; either version 2
+##  of the License, or (at your option) any later version.
+##
+##  This program is distributed in the hope that it will be useful,
+##  but WITHOUT ANY WARRANTY; without even the implied warranty of
+##  MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+##  GNU General Public License for more details.
+##
+##  You should have received a copy of the GNU General Public License
+##  along with this program; if not, write to the Free Software Foundation,
+##  Inc., 59 Temple Place - Suite 330, Boston, MA  02111-1307, USA.
+##
+##  (http://www.gnu.org/copyleft/gpl.html)
+#
+# SDR VERSION: 0.74.1
+
+# NOTES
+#
+# 1. Perl Critic level 4
+# 2. Do not run OS commands as much as u can
+
+# /opt/sdr
+# /opt/software/sdr-0741-linux-x64.tar.bz2
+
+use strict;
+use warnings;
+use 5.010;
+use File::Basename;
+use Getopt::Std;
+use File::Path;
+
+#
+# Process Command line arguments
+#
+usage() if defined $ARGV[0] and $ARGV[0] eq "--help";
+getopts('hVp:f:i:') or usage();
+revision() if defined $main::opt_V;
+usage() if defined $main::opt_h;
+
+# Variables
+$main::opt_h = 0;    # help option
+$main::opt_V = 0;    # revision option
+
+#my $sdr_default_installation_path = "/opt/sdr";
+my $sdr_default_installation_path = "/home/bdaftary/sdr/sdr";
+my $sdr_default_file_path = "/opt/software";
+my $wget_path = '/usr/bin/wget';
+my $uname = "sdr";
+my $gname = "$uname";
+my $uid = 500;
+my $gid = 0;
+my ($chopt, $inopt, $upopt, $unopt, $guopt, $clopt) = 0;
+my ($fileinfo, $pathinfo, $command, $version);
+
+local $| = 1;        # autoflush
+
+# daemon name
+my @exts = qw(.tar.gz .tar.bz2);
+
+# ######### #
+# MAIN BODY #
+# ######### #
+
+chomp(my $osname = $^O);
+chomp(my $processor = `uname -i`);
+#$ENV{'http_proxy'} = 'http://http-proxy:8080';
+
+# check for pathinfo flag
+if ( defined $main::opt_p ) {
+    $pathinfo = $main::opt_p;
+}
+else { $pathinfo = $sdr_default_installation_path }
+
+# check for fileinfo flag
+if ( defined $main::opt_f ) {
+    $fileinfo = $main::opt_f;
+}
+
+# check for id flag
+if ( defined $main::opt_i ) {
+    $gid = $main::opt_i;
+}
+else { $gid = $uid }
+
+$command = shift;
+# check on internal commands
+given($command) {
+    #  check command
+    when('check') { $chopt=1; }
+
+    #  install command
+    when('install') { $inopt=1; }
+
+    #  upgrade command
+    when('upgrade') { $upopt=1; }
+
+    #  uninstall command
+    when('uninstall') { $unopt=1; }
+
+    #  genuser command
+    when('genuser') { $guopt=1; }
+
+    #  clean command
+    when('clean') { $clopt=1; }
+
+    default { usage(); }
+}
+
+if ($chopt) {
+   check();
+}
+elsif ($inopt) {
+   install();
+}
+elsif ($upopt) {
+   upgrade();
+}
+elsif ($unopt) {
+   uninstall();
+}
+elsif ($guopt) {
+   genuser();
+}
+elsif ($clopt) {
+   clean();
+}
+
+# Subroutines
+sub check {
+   # NOTE:
+   # #  1. if (VERSION) -> compare each recorder -V against VERSION file
+   # #     else -> compare each recorders version with each other. they must match
+   # #  2. directory strcuture sdr toolkit should include 
+   # #     bin etc man log lib include openssl perl share (dirs)
+   # #  3. startups things: check all these files exist
+   # #      sdr
+   # #      sdr.instant
+   # #      sdr.conf
+   # #      for each start file -> match a recorder in bin
+   # #        if jvmrec.start exists -> bin/jvmrec must exist
+   # #
+   #
+   my $checkparam = 0;
+   if (-d "$pathinfo") {
+      if (( defined( check_dirs())) && ( defined( check_files()))) {
+        my ($fileinf, $regex, $file, $filerec, $recversion);
+        $regex = qr/VERSION/;
+        if ( -e "$pathinfo/VERSION" ) {
+           $fileinf = "$pathinfo/VERSION";
+        }
+        else {
+           $fileinf = "$pathinfo/bin/setenv";
+        }
+        open $file, '<', "$fileinf"
+           or die "could not open file: $file";
+        while (my $version = <$file>) {
+           if ($version =~ /$regex/) {
+              chomp($version);
+              my @versions = split(' ', $version);
+              $version = $versions[3];
+              my ($recorders, $output, $words, $ver);
+              $recorders = "sysrec cpurec nicrec netrec jvmrec";
+              my @recwords = split(' ', $recorders);
+              foreach my $rec (@recwords) {
+                 open $filerec, '<', "$pathinfo/bin/$rec"
+                    or die "could not open file: $filerec";
+                 while ($recversion = <$filerec>) {
+                    if ($recversion =~ /$regex/) {
+                       chomp($recversion);
+                       my @recversions = split(' ', $recversion);
+                       if ("$version" ne "$recversions[3]") {
+                          print "Current version is $version, is not matched with recorder $rec version $recversions[3]\n";
+                       }
+                    }
+                 }
+                 close $filerec;
+              }
+           } 
+        }
+        close $file;
+      }
+   $checkparam = 1;
+   }
+   else {
+      print "SDR is not installed on mentioned path!\n";
+   }
+   return $checkparam;
+}
+
+sub check_files {
+   my $fileparam = 0;
+   my @files = ("sdr","sdr.instant","sdr.conf","sysrec.start",
+      "cpurec.start","nicrec.start","netrec.start","jvmrec.start");
+   for my $i (0 .. $#files) {
+      if (! -e $pathinfo.'/etc/'.$files[$i]) {
+         die "$pathinfo/etc/$files[$i] does not exists.\n";
+      }
+      else {
+         $fileparam = 1;
+      }
+   }
+   return $fileparam;
+}
+
+sub check_dirs {
+   my ($dirs, $words);
+   my $dirparam = 0;
+   $dirs="bin etc include lib log man openssl perl share";
+   my @dirinfo = split(' ', $dirs);
+   foreach my $dircheck (@dirinfo) {
+      my @words = split(' ', $dircheck);
+      if (! -d "$pathinfo/$words[0]") {
+         die "$pathinfo/$words[0] does not exists.\n";
+      }
+      else {
+         $dirparam = 1;
+      }
+   }
+   return $dirparam;
+}
+
+sub install {
+# groupadd -g 16370 sdr
+# useradd -c "SDR" -u 16370 -g 16370 -s /bin/bash -d /home/sdr -m sdr
+# chage -I -1 -m 0 -M 99999 -E -1 sdr
+    print "You are in \"install\" function 1... $gid and Path Info : $pathinfo and File Info : $fileinfo\n";
+    if ( defined ( check() ) ) {
+       print " Check Param is TRUE \n";
+       checkgroup($gid);
+    }
+    creategroup("$gname");
+#    print "You are in \"install\" function ...\n";
+    return;
+}
+
+sub upgrade {
+    print "You are in \"upgrade\" function ...\n";
+    return;
+}
+
+sub uninstall {
+   if (-d "$pathinfo") {
+      #NOTE: Uninstall mode
+      # 0. works with -p
+      # 1. shutdown sdr
+      # 2. shutdown instant mode if running
+      # 3. remove /opt/sdr or whatever prefix
+      # 4. remove group, user
+      #
+      sdrcmd("stop");
+      system ("rm -fR $pathinfo");
+      if ( defined getpwnam($uname)) {
+         removeuser("$uname");
+      }
+      if ( defined getgrnam($gname)) {
+         removegroup("$gname");
+      }
+   }
+   else {
+      print "Given $pathinfo does not exists!\n";
+   }
+   return;
+}
+
+sub genuser {
+    print "You are in \"genuser\" function ...\n";
+    return;
+}
+
+sub clean {
+# NOTE
+# 0. works with -p
+# 1. cleaning old log/daily directories, older than N days !
+    print "You are in \"clean\" function ...\n";
+    return;
+}
+
+# revision - print revision and exit
+sub revision {
+
+    print STDERR <<END;
+getsdr: 0.74.1, 2012-09-30
+END
+    exit 0;
+}
+
+sub usage {
+    print STDERR <<END;
+USAGE: $0 [-p path_to_install] [-f file_from_install_with absolute_path] [-hV] command
+
+OPTIONS:
+   -p        : path to install SDR (Default is /opt/sdr)
+               prefix ::= /opt/sdr
+                          /usr/local/sdr
+   -f        : filename with absolute path
+               filename ::= sdr package (tar.gz, tar.bz2)
+   -h        : help information
+   -V        : release version
+
+COMMAND:
+   check
+   install
+   upgrade
+   uninstall
+   genuser
+   clean
+
+  e.g. getsdr check                                          checks if SDR is installed already or not
+       getsdr install                                        download and install latest version of SDR in /opt/sdr
+       getsdr -p /path_to_install install                    download and install latest version of SDR in prefix path
+       getsdr -p /path_to_install -f sdr075.tar.bz2 install  install SDR from given file and in given prefix path
+       getsdr upgrade                                        download and upgrade latest version of SDR in /opt/sdr
+       getsdr -p /path_to_install upgrade                    download and upgrade latest version of SDR in prefix path
+       getsdr -p /path_to_install -f sdr075.tar.bz2 upgrade  upgrade SDR from given file and in given prefix path
+       getsdr uninstall                                      uninstall SDR from host
+       getsdr genuser                                        checks and creates sdr user and group if not exists
+       getsdr clean                                          cleans obselete files
+
+END
+    exit 0;
+}
+
+sub sdrcmd {
+my $excmd = shift;
+`/etc/init.d/sdr $excmd`;
+`/etc/init.d/sdr.instant $excmd`;
+return;
+}
+
+sub createuser {
+}
+
+sub creategroup {
+   print "You are in create group sub routines ....\n";
+   my $grname = shift;
+   print "You are in create group sub routines 1 $grname....\n";
+   print " ID is $gid and GROUP NAME : $grname\n";
+   if ( defined $gid ) {
+   print " ID is $gid and GROUP NAME : $grname\n";
+#   `/us/sbin/groupadd -g $main::opt_i $uname` 
+   }
+   else {
+#   `/us/sbin/groupadd -g $gid $uname` 
+}
+#   my $grid = getgrnam($gname);
+}
+
+sub removeuser {
+my $name = shift;
+`/usr/sbin/userdel -r $name`;
+return;
+}
+
+sub removegroup {
+my $group = shift;
+`/usr/sbin/groupdel $group`;
+return;
+}
+
+sub checkgroup {
+my $groupid = shift;
+my $grid = getgrnam($gname);
+my $groupname = $gname;
+my $grname = getgrgid($groupid);
+
+print "$grid\n";
+print "$groupid\n";
+print "$grname\n";
+print "$groupname\n";
+
+#if ( defined ( getgrnam($gname) ) && ( defined ( getgrgid($groupid))))
+
+if (( $groupid == $gid ) && ($groupname eq $grname))
+{
+  print "Group Name And Group ID is matched !!!" 
+}
+else
+{
+  print "Group Name And Group ID is NOT matched !!!" 
+}
+return;
+}
